@@ -7,3 +7,5 @@ variable integration step, planet collision and breakup rules...
 The Python3 version is fully object-oriented and uses the pygame rendering engine. If features classes Universe and Planet. The Planet class has variables and methods relative to each planet behavior, including drawing, while the Universe class has a dynamic table of Planets and performs the physics: interaction calculation, time step adjustment, collision and fragmentation deteciton, etc. Global objects such as the representation surface are managed in the __main__ section and passed down myUniverse and Planet objects.
 
 It has a choice of preset initial conditions (called by the keyboard digits) as well as a few commands to trigger a variety of random initial conditions (few or many bodies). Use the embedded help for info (key ? or h).
+
+Call with: python3 gravity_v3.py
