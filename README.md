@@ -6,3 +6,4 @@ It features a 3D model with a choice between Euler and the much more accurate Ve
 variable integration step, planet collision and breakup rules...
 The Python3 version is fully object-oriented and uses the pygame rendering engine.
 
+If features classes Universe and Planet. The Planet class has variables and methods relative to each planet behavior, including drawing, while the Universe class has a dynamic table of Planets and performs the physics: interaction calculation, time step adjustment, collision and fragmentation deteciton, etc. Global objects such as the representation surface are managed in the __main__ section and passed down myUniverse and Planet objects.
