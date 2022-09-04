@@ -1,0 +1,606 @@
+' ====================================
+' MULTIBODY GRAVITATIONAL TRAJECTORIES
+' ====================================
+' Henri Souchay - 1987-2022 - "the works of a life"
+' NEW ! in 3D, with variable timestep
+' keyboard commands:
+' r - restart with current number of bodies
+' 2-9 - reduce number of bodies with closest planets, or restart with higher number of bodies
+' c - cleanup screen
+' d,i - display internal tables : positions, speeds, forces, masses
+' h,? - display help
+' q - quit
+OPTION BASE 1
+' default calculation method: 0=Euler 1=Verlet
+method%=1
+main
+PROCEDURE main
+  ' in great C style :)
+  LOCAL rp%
+  HIDEM
+  maxnbodies%=90
+  nbodies%=15
+  inittables
+  initvars
+  REPEAT
+    ' select computation method
+    SELECT method%
+    CASE 0
+      IF @computeforces(p(),f())=0
+        ' no collision
+        applyforces(timestep,f(),v())
+        computemotion(timestep,v(),p())
+      ELSE
+        ' there was a collision
+      ENDIF
+    CASE 1
+      verlet(timestep,p(),v())
+    ENDSELECT
+    k$=INKEY$
+    SELECT k$
+    CASE "c"
+      cleanscreen
+    CASE "d","i"
+      displayinternals
+    CASE "?","h"
+      PRINT AT(1,1)
+      PRINT "keyboard commands:"
+      PRINT " r - restart with current number of bodies"
+      PRINT " 2-9 - reduce number of bodies with closest planets, or restart with higher number of bodies"
+      PRINT " c - cleanup screen"
+      PRINT " d,i - display internal tables : positions, speeds, forces, masses"
+      PRINT " h,? - display help"
+      PRINT " q - quit"
+    CASE "r"
+      initvars
+    CASE "q",27
+      END
+    CASE "2" TO "9"
+      newnbodies%=VAL(k$)*VAL(k$)/2
+      IF (newnbodies%>nbodies%)
+        nbodies%=newnbodies%
+        initvars
+      ELSE
+        msg$=""
+        rp%=100
+        WHILE nbodies%>newnbodies%
+          rp%=@planetfind("lightest")
+          IF rp%>0
+            planetremove(rp%)
+            IF msg$=""
+              msg$="removed planet "
+            ELSE
+              msg$=msg$+", "
+            ENDIF
+            msg$=msg$+STR$(rp%)
+          ENDIF
+        WEND
+        msg$=msg$+".             "
+      ENDIF
+    CASE "m"
+      ' toggles calculation method between Euler and Verlet
+      method%=1-method%
+      IF method%=0
+        msg$="Euler calculation"
+      ELSE
+        msg$="Verlet calculation"
+      ENDIF
+    ENDSELECT
+    drawplanets
+    PRINT AT(1,1);USING "nbodies ## timestep #.#### step ####### time ####.# &",nbodies%,timestep,step%,time,msg$;
+    step%=step%+1
+  UNTIL MOUSEK=2
+RETURN
+> PROCEDURE inittables
+  DIM sprites$(maxnbodies%,2)
+  DIM p(maxnbodies%,3)
+  DIM v(maxnbodies%,3)
+  DIM f(maxnbodies%,3)
+  DIM m(maxnbodies%)
+  ' mutual distance arrays - should be a local var in procedure computeforces
+  DIM d2(maxnbodies%,maxnbodies%)
+  DIM d(maxnbodies%,maxnbodies%)
+  ' sv used to store the sum of initial speeds, used to set the barycenter to zero speed
+  DIM sv(3)
+  ' tables used for verlet calculation method
+  DIM a0(maxnbodies%,3),v0(maxnbodies%,3),a1(maxnbodies%,3)
+RETURN
+PROCEDURE initvars
+  PRINT AT(1,1);"initializing vars"
+  ' screen center
+  screenw%=320
+  screenh%=200
+  ' out-of-bounds distance -> remove planet if beyond in any direction
+  bounddistance%=1000
+  ' counting step
+  step%=0
+  ' gravity constant - tuned manually to get nice results, just like the Creator did
+  g=1000
+  ' collision is detected when the distance becomes too small, see PROCEDURE computeforces
+  collisionradius=3
+  ' max init speed
+  vinitmax=MAX(3,nbodies%/2)
+  ' time step (could be in g just as well)
+  timestep=0.1
+  time=0
+  ' the force thresholds are used to adjust timesteps when integration intervals become too small/large
+  minaccelthreshold=0.2
+  maxaccelthreshold=0.5
+  ' info message
+  msg$=""
+  ' initialize positions, speeds, forces, masses
+  ' coordinates are in screen referential with no loss of generality
+  ' further down x refers to dim 1, y->dim 2, z->dim 3
+  ARRAYFILL p(),0
+  ARRAYFILL v(),0
+  ARRAYFILL f(),0
+  ARRAYFILL m(),1
+  ' mutual distance arrays - should be a local var in procedure computeforces
+  ' set initial positions at random (or otherwise)
+  FOR i%=1 TO nbodies%
+    p(i%,1)=RANDOM(screenw%)+screenw%/2
+    p(i%,2)=RANDOM(screenh%)+screenh%/2
+    p(i%,3)=RANDOM(screenh%)+screenh%/2
+  NEXT i%
+  ' set masses and corresponding sprite
+  LOCAL mass,a$
+  FOR i%=1 TO nbodies%
+    PRINT i%
+    mass=RANDOM(3)+1
+    m(i%)=mass
+    a$=FN planetsprite$(mass)
+    sprites$(i%,1)=a$
+    sprites$(i%,2)=a$
+  NEXT i%
+  ' set initial speeds
+  ' optimization tip: v2 used to store the half of speed interval
+  LOCAL v2
+  ' sv total momentum of nbodies-1 used to keep barycenter centered on screen
+  ' by further compensating -sv on last body
+  ARRAYFILL sv(),0
+  v2=vinitmax/2
+  FOR i%=1 TO nbodies%-1
+    FOR j%=1 TO 3
+      v(i%,j%)=(RANDOM(vinitmax)-v2)
+      sv(j%)=sv(j%)+m(i%)*v(i%,j%)
+    NEXT j%
+  NEXT i%
+  ' apply compensating momentum on last body
+  FOR j%=1 TO 3
+    v(nbodies%,j%)=-sv(j%)/m(nbodies%)
+  NEXT j%
+  cleanscreen
+  ' ok let's start !
+RETURN
+> FUNCTION computeforces(VAR p(),f())
+'  PRINT "computing forces"
+' mutual square and distance tables
+LOCAL ntimestep,dist,d2,dmin,dmini%,dminj%,imax%,fij,fijx,fijy,fijz,i%,j%,dx,dy,dz
+ARRAYFILL d(),0
+ARRAYFILL f(),0
+dmin=1000
+imax%=nbodies%-1
+FOR i%=1 TO imax%
+  FOR j%=i%+1 TO nbodies%
+    dx=p(i%,1)-p(j%,1)
+    dy=p(i%,2)-p(j%,2)
+    dz=p(i%,3)-p(j%,3)
+    d2=dx*dx+dy*dy+dz*dz
+    d2(j%,i%)=d2
+    d2(i%,j%)=d2
+    dist=SQR(d2)
+    IF (dist<dmin)
+      dmini%=i%
+      dminj%=j%
+      dmin=dist
+    ENDIF
+    d(i%,j%)=dist
+    d(j%,i%)=dist
+  NEXT j%
+NEXT i%
+' detect collision
+IF dmin<collisionradius
+  planetsmerge(dmini%,dminj%)
+  RETURN 1
+ELSE
+  ' forces vectors
+  FOR i%=1 TO imax%
+    FOR j%=i%+1 TO nbodies%
+      ' modulus
+      fij=m(i%)*m(j%)*g/d2(i%,j%)
+      ' project on axis
+      fijx=-(p(i%,1)-p(j%,1))/d(i%,j%)*fij
+      fijy=-(p(i%,2)-p(j%,2))/d(i%,j%)*fij
+      fijz=-(p(i%,3)-p(j%,3))/d(i%,j%)*fij
+      f(i%,1)=f(i%,1)+fijx
+      f(i%,2)=f(i%,2)+fijy
+      f(i%,3)=f(i%,3)+fijz
+      f(j%,1)=f(j%,1)-fijx
+      f(j%,2)=f(j%,2)-fijy
+      f(j%,3)=f(j%,3)-fijz
+    NEXT j%
+  NEXT i%
+  ntimestep=MIN(4,dmin/500)
+  IF ntimestep>timestep
+    timestep=MIN(ntimestep,timestep*2)
+  ELSE
+    timestep=ntimestep
+  ENDIF
+ENDIF
+RETURN 0
+ENDFUNC
+> PROCEDURE planetsmerge(n1%,n2%)
+' planets n1% and n2% are merged while preserving their momentum and not disrupting the rest
+hideplanets
+' need to secure that changes to tables don't affect merged planet
+' so index of merged has to be lower than removed one
+msg$="merged planet "+STR$(n1%)+" and "+STR$(n2%)
+'  planetdisplay(n1%)
+'  planetdisplay(n2%)
+'  waitclick
+' order n1% and n2% so n1%<n2%
+IF n1%>n2%
+  SWAP n1%,n2%
+  PRINT AT(70,1),"swap alert"
+ENDIF
+' now we will be updating n1%
+' POSITIONS
+' update position with barycenter of n1% and n2%
+FOR j%=1 TO 3
+  p(n1%,j%)=(m(n1%)*p(n1%,j%)+m(n2%)*p(n2%,j%))/(m(n1%)+m(n2%))
+NEXT j%
+' SPEEDS
+' let's keep the momentum
+FOR j%=1 TO 3
+  ' all momentum transfered to n1%
+  v(n1%,j%)=(m(n1%)*v(n1%,j%)+m(n2%)*v(n2%,j%))/(m(n1%)+m(n2%))
+  v(n2%,j%)=0
+NEXT j%
+' MASS
+m(n1%)=m(n1%)+m(n2%)
+' update sprite of n1%
+sprites$(n1%,1)=FN planetsprite$(m(n1%))
+sprites$(n1%,2)=FN planetsprite$(m(n1%))
+'  planetdisplay(n1%)
+'  planetdisplay(n2%)
+'  waitclick
+planetremove(n2%)
+RETURN
+> PROCEDURE waitclick
+REPEAT
+UNTIL MOUSEK=1
+REPEAT
+UNTIL MOUSEK=0
+RETURN
+> PROCEDURE planetremove(n2%)
+' need to dispatch momentum on remaining planets to ensure centering of barycenter
+LOCAL i%,j%,totalmass
+ERASE mv()
+DIM mv(3)
+' momentum of planet to be removed - will be dispatched on the rest to ensure centering
+FOR i%=1 TO 3
+  mv(i%)=m(n2%)*v(n2%,i%)
+NEXT i%
+' lets remove index n2% in tables: anything below n2%->no change, anything above gets ranked down
+hideplanets
+IF n2%<nbodies%
+  FOR i%=n2%+1 TO nbodies%
+    m(i%-1)=m(i%)
+    FOR j%=1 TO 3
+      p(i%-1,j%)=p(i%,j%)
+      v(i%-1,j%)=v(i%,j%)
+    NEXT j%
+    ' update sprites
+    sprites$(i%-1,1)=sprites$(i%,1)
+    sprites$(i%-1,2)=sprites$(i%,2)
+  NEXT i%
+ENDIF
+m(nbodies%)=0
+' reduce number of bodies
+nbodies%=nbodies%-1
+' adjust momentum of remaining planets
+' total mass
+totalmass=0
+FOR i%=1 TO nbodies%
+  totalmass=totalmass+m(i%)
+NEXT i%
+' dispatch momentum
+FOR i%=1 TO nbodies%
+  FOR j%=1 TO 3
+    v(i%,j%)=v(i%,j%)+mv(j%)/totalmass
+  NEXT j%
+NEXT i%
+' recompute the forces - yeah i know nobody should code like that
+'  computeforces(p(),f())
+RETURN
+> FUNCTION totalmomentum(VAR v(),m())
+LOCAL i%,j%
+ERASE tm()
+DIM tm(3)
+ARRAYFILL tm(),0
+FOR i%=1 TO nbodies%
+FOR j%=1 TO 3
+  tm(j%)=tm(j%)+m(i%)*v(i%,j%)
+NEXT j%
+NEXT i%
+RETURN tm(1)*tm(1)+tm(2)*tm(2)+tm(3)*tm(3)
+ENDFUNC
+> PROCEDURE planetdisplay(i%)
+LOCAL j%
+PRINT USING "planet # Position      Speed      Mass #.#",i%,m(i%)
+FOR j%=1 TO 3
+PRINT USING "            ###.#    +##.###",p(i%,j%),v(i%,j%)
+NEXT j%
+RETURN
+> PROCEDURE applyforces(dt,VAR f(),v())
+LOCAL i%,j%
+FOR i%=1 TO nbodies%
+FOR j%=1 TO 3
+  v(i%,j%)=v(i%,j%)+dt*f(i%,j%)/m(i%)
+NEXT j%
+NEXT i%
+RETURN
+> PROCEDURE computemotion(dt,VAR v(),p())
+LOCAL i%,j%
+FOR i%=1 TO nbodies%
+FOR j%=1 TO 3
+  p(i%,j%)=p(i%,j%)+dt*v(i%,j%)
+NEXT j%
+NEXT i%
+time=time+timestep
+RETURN
+> PROCEDURE hideplanets
+' need to erase the sprites in inverse order of display
+VSYNC
+FOR i%=nbodies% DOWNTO 1
+SPRITE sprites$(i%,1)
+SPRITE sprites$(i%,2)
+NEXT i%
+RETURN
+> PROCEDURE drawplanets
+LOCAL x%,y%,z%,i%
+' 3D plot
+VSYNC
+hideplanets
+' now plot new points
+FOR i%=1 TO nbodies%
+x%=MIN(MAX(0,p(i%,1)),screenw%*2)
+y%=MIN(MAX(0,p(i%,2)/2),screenh%)
+z%=MIN(MAX(screenh%,p(i%,3)/2+screenh%),screenh%*2)
+PLOT x%,y%
+PLOT x%,z%
+' test in-bound every 20 steps
+NEXT i%
+' and display sprites at new position
+FOR i%=1 TO nbodies%
+x%=MIN(MAX(0,p(i%,1)),screenw%*2)
+y%=MIN(MAX(0,p(i%,2)/2),screenh%)
+z%=MIN(MAX(screenh%,p(i%,3)/2+screenh%),screenh%*2)
+SPRITE sprites$(i%,1),x%,y%
+SPRITE sprites$(i%,2),x%,z%
+NEXT i%
+' every 50 steps, test planets' coordinates vs boundary
+IF step% MOD 50=1
+FOR i%=1 TO nbodies%
+  cmax=MAX(p(i%,1),-p(i%,1),p(i%,2),-p(i%,2),p(i%,3),-p(i%,3))
+  IF cmax>bounddistance%
+    planetremove(i%)
+    msg$="lost planet "+STR$(i%)+"            "
+  ENDIF
+NEXT i%
+ENDIF
+RETURN
+> PROCEDURE displayinternals
+'  PRINT "step=",step%,"timestep=",timestep
+PRINT AT(1,1);USING "nbodies = #",nbodies%
+PRINT "-- velocities ----------------------------------------"
+MAT PRINT v()
+PRINT "-- positions -------------------------------------"
+MAT PRINT p()
+PRINT "-- masses -------------------------------------"
+MAT PRINT m()
+REPEAT
+UNTIL MOUSEK=1
+cleanscreen
+RETURN
+> PROCEDURE cleanscreen
+hideplanets
+CLS
+LINE 0,screenh%,screenw%*2,screenh%
+RETURN
+> FUNCTION crosssprite$
+LOCAL sprite$,i%,pattern%,mask%
+' action point location (8,8), mode normal 1, mask color 0, sprite color 1
+sprite$=MKI$(8)+MKI$(8)+MKI$(0)+MKI$(0)+MKI$(1)
+RESTORE crosssprite
+FOR i%=1 TO 16
+READ pattern%,mask%
+sprite$=sprite$+MKI$(mask%)+MKI$(pattern%)
+NEXT i%
+crosssprite:
+DATA %0000000000000000,%0000001110000000
+DATA %0000000100000000,%0000001110000000
+DATA %0000000100000000,%0000001110000000
+DATA %0000000100000000,%0000001110000000
+DATA %0000000100000000,%0000001110000000
+DATA %0000000100000000,%0000001110000000
+DATA %0000000100000000,%1111111111111111
+DATA %0111111111111100,%1111111111111111
+DATA %0000000100000000,%1111111111111111
+DATA %0000000100000000,%0000001110000000
+DATA %0000000100000000,%0000001110000000
+DATA %0000000100000000,%0000001110000000
+DATA %0000000100000000,%0000001110000000
+DATA %0000000100000000,%0000001110000000
+DATA %0000000000000000,%0000001110000000
+DATA %0000000000000000,%0000000000000000
+DATA %0000000000000000,%0000000000000000
+RETURN sprite$
+ENDFUNC
+> FUNCTION planetsprite$(m)
+LOCAL sprite$,i%,pattern%,mask%
+' action point location (8,8), mode normal 1, mask color 0, sprite color 1
+sprite$=MKI$(8)+MKI$(8)+MKI$(0)+MKI$(0)+MKI$(1)
+RESTORE planet1
+IF m>=5.5
+RESTORE planet6
+ELSE IF m>=4.5
+RESTORE planet5
+ELSE IF m>=3.5
+RESTORE planet4
+ELSE IF m>2.5
+RESTORE planet3
+ELSE IF m>=1.5
+RESTORE planet2
+ENDIF
+FOR i%=1 TO 16
+READ pattern%,mask%
+sprite$=sprite$+MKI$(mask%)+MKI$(pattern%)
+NEXT i%
+planet1:
+DATA 0,0,0,0,0,0,0,0,0,0,0,384,384,576,704,1312
+DATA 960,1056,384,576,0,384,0,0,0,0,0,0,0,0,0,0
+planet2:
+DATA 0,0,0,0,0,0,0,0,0,0,0,896,896,1088,1728,2336
+DATA 1216,2848,1984,2080,896,1088,0,896,0,0,0,0,0,0,0,0
+planet3:
+DATA 0,0,0,0,0,0,0,0,0,896,896,1984,1984,3168,3680,6576
+DATA 3936,6320,3808,6448,1984,3168,896,1984,0,896,0,0,0,0,0,0
+planet4:
+DATA %0000000000000000,%0000000000000000
+DATA %0000000000000000,%0000000000000000
+DATA %0000000000000000,%0000001110000000
+DATA %0000001110000000,%0000111111100000
+DATA %0000111111100000,%0001111111110000
+DATA %0001111111110000,%0011111111111000
+DATA %0001111110110000,%0011111111111000
+DATA %0011111110111000,%0111111111111100
+DATA %0011111001111000,%0111111111111100
+DATA %0011111111111000,%0111111111111100
+DATA %0001111111110000,%0011111111111000
+DATA %0001111111110000,%0111111111111100
+DATA %0000111111100000,%0001111111110000
+DATA %0000001110000000,%0000111111100000
+DATA %0000000000000000,%0000001110000000
+DATA %0000000000000000,%0000000000000000
+DATA %0000000000000000,%0000000000000000
+planet5:
+DATA %0000000000000000,%0000000000000000
+DATA %0000000000000000,%0000001110000000
+DATA %0000001110000000,%0000011111000000
+DATA %0000111111100000,%0001111111110000
+DATA %0001101111110000,%0011111111111000
+DATA %0011011110111000,%0111111111111100
+DATA %0010111111011000,%0111111111111100
+DATA %0110111111011100,%1111111111111110
+DATA %0110111111011100,%1111111111111110
+DATA %0111011110111100,%1111111111111110
+DATA %0011111101101000,%0111111111111100
+DATA %0011110011011000,%0111111111111100
+DATA %0001111110110000,%0011111111111000
+DATA %0000011011000000,%0001111111110000
+DATA %0000001110000000,%0000011111000000
+DATA %0000000000000000,%0000001110000000
+DATA %0000000000000000,%0000000000000000
+planet6:
+DATA %0000000000000000,%0000001110000000
+DATA %0000011111000000,%0000111111100000
+DATA %0001111110110000,%0011111111111000
+DATA %0011111101011000,%0111111111111100
+DATA %0011111110011000,%0111111111111100
+DATA %0111111111111100,%1111111111111110
+DATA %0111111111111100,%1111111111111110
+DATA %0111111111111100,%1111111111111110
+DATA %0111000111111100,%1111111111111110
+DATA %0110011011111100,%1111111111111110
+DATA %0010001011111000,%0111111111111100
+DATA %0011000111111000,%0111111111111100
+DATA %0001111111110000,%0011111111111000
+DATA %0000011111000000,%0000111111100000
+DATA %0000000000000000,%0000001110000000
+DATA %0000000000000000,%0000000000000000
+DATA %0000000000000000,%0000000000000000
+RETURN sprite$
+ENDFUNC
+> PROCEDURE verlet(dt,VAR p(),v())
+' after //femto-physique/analyse-numerique/methode-de-verlet.php
+' the verlet method adjusts for acceleration change on the trajectory over the step
+LOCAL i%,j%
+ERASE a0(),a1(),v0()
+DIM a0(nbodies%,3)
+DIM a1(nbodies%,3)
+DIM v0(nbodies%,3)
+' v0 serves as intermediate speed vector
+FOR i%=1 TO nbodies%
+FOR j%=1 TO 3
+v0(i%,j%)=v(i%,j%)
+NEXT j%
+NEXT i%
+' computes forces (ie. accelerations) at original position
+IF @computeforces(p(),a0())=0
+' intermediate speed vector: v+dt/2*a
+applyforces(dt/2,a0(),v0())
+' next position is computed: p = p + dt.(v+dt/2*a)
+computemotion(dt,v0(),p())
+' forces are computed at new position
+IF @computeforces(p(),a1())=0
+' speed is updated with average of accelerations
+applyforces(dt/2,a1(),v())
+applyforces(dt/2,a0(),v())
+ELSE
+' a collision occured, don't update anything before next step
+ENDIF
+ELSE
+' a collision occured, don't update anything before next step
+ENDIF
+RETURN
+> FUNCTION planetfind(criterion$)
+' criterion can be 'farthest', 'heaviest', 'lightest'
+LOCAL d2,d2max,dx,dy,dz,imax%,imin%,mmax,mmin
+IF criterion$="farthest"
+imax%=-1
+d2max=-1
+FOR i%=1 TO nbodies%
+dx=p(i%,1)-screenw%
+dy=p(i%,2)-screenh%
+dz=p(i%,3)-screenh%
+d2=dx*dx+dy*dy+dz*dz
+IF d2>d2max
+d2max=d2
+imax%=i%
+ENDIF
+NEXT i%
+RETURN imax%
+ELSE IF criterion$="1000+"
+FOR i%=1 TO nbodies%
+dx=p(i%,1)-screenw%
+dy=p(i%,2)-screenh%
+dz=p(i%,3)-screenh%
+d2=dx*dx+dy*dy+dz*dz
+IF d2>1000000
+RETURN i%
+ENDIF
+NEXT i%
+RETURN 0
+ELSE IF criterion$="heaviest"
+imax%=-1
+mmax=-1
+FOR i%=1 TO nbodies%
+IF m(i%)>mmax
+mmax=m(i%)
+imax%=i%
+ENDIF
+NEXT i%
+RETURN imax%
+ELSE IF criterion$="lightest"
+imin%=-1
+mmin=100000000
+FOR i%=1 TO nbodies%
+IF m(i%)<mmin
+mmin=m(i%)
+imin%=i%
+ENDIF
+NEXT i%
+RETURN imin%
+ENDIF
+ENDFUNC
