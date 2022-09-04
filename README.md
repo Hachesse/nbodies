@@ -8,5 +8,4 @@ The Python3 version is fully object-oriented and uses the pygame rendering engin
 
 It has a choice of preset initial conditions (called by the keyboard digits) as well as a few commands to trigger a variety of random initial conditions (few or many bodies). Use the embedded help for info (key ? or h).
 
-Call with: 
-> python3 gravity_v3.py
+Call with `python3 gravity_v3.py`
